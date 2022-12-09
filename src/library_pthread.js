@@ -31,6 +31,9 @@ var LibraryPThread = {
   $PThread__deps: ['_emscripten_thread_init',
                    '$killThread',
                    '$cancelThread', '$cleanupThread', '$zeroMemory',
+#if MAIN_MODULE
+                   '$markAsZombie',
+#endif
                    '$spawnThread',
                    '_emscripten_thread_free_data',
                    'exit',
@@ -55,6 +58,11 @@ var LibraryPThread = {
     // the reverse mapping, each worker has a `pthread_ptr` when its running a
     // pthread.
     pthreads: {},
+#if MAIN_MODULE
+    // Zombie threads are threads that have finished running but we not yet
+    // joined.
+    zombieThreads: {},
+#endif
 #if PTHREADS_DEBUG
     nextWorkerID: 1,
     debugInit: function() {
@@ -267,6 +275,10 @@ var LibraryPThread = {
           spawnThread(d);
         } else if (cmd === 'cleanupThread') {
           cleanupThread(d['thread']);
+#if MAIN_MODULE
+        } else if (cmd === 'markAsZombie') {
+          markAsZombie(d['thread']);
+#endif
         } else if (cmd === 'killThread') {
           killThread(d['thread']);
         } else if (cmd === 'cancelThread') {
@@ -543,6 +555,9 @@ var LibraryPThread = {
     assert(pthread_ptr, 'Internal Error! Null pthread_ptr in cleanupThread!');
 #endif
     var worker = PThread.pthreads[pthread_ptr];
+#if MAIN_MODULE
+    delete PThread.zombieThreads[pthread_ptr];
+#endif
     assert(worker);
     PThread.returnWorkerToPool(worker);
   },
@@ -1040,7 +1055,7 @@ var LibraryPThread = {
     // Before we call the thread entry point, make sure any shared libraries
     // have been loaded on this there.  Otherwise our table migth be not be
     // in sync and might not contain the function pointer `ptr` at all.
-    __emscripten_thread_sync_code();
+    __emscripten_dlsync_self();
 #endif
     // pthread entry points are always of signature 'void *ThreadMain(void *arg)'
     // Native codebases sometimes spawn threads with other thread entry point
@@ -1068,6 +1083,80 @@ var LibraryPThread = {
     }
 #endif
   },
+
+#if MAIN_MODULE
+  _emscripten_thread_exit_joinable: function(thread) {
+    // Called when a thread exits and is joinable.  This puts the thread
+    // into zombie state where it can't run anymore work but cannot yet
+    // be cleaned up.
+    if (!ENVIRONMENT_IS_PTHREAD) markAsZombie(thread);
+    else postMessage({ 'cmd': 'markAsZombie', 'thread': thread });
+  },
+
+  $markAsZombie: function(pthread_ptr) {
+    PThread.zombieThreads[pthread_ptr] = true;
+  },
+
+  // Asynchronous version dlsync_threads. Always run on the main thread.
+  // This work happens asynchronously. The `callback` is called once this work
+  // is completed, passing the ctx.
+  // TODO(sbc): Should we make a new form of __proxy attribute for JS library
+  // function that run asynchronously like but blocks the caller until they are
+  // done.  Perhaps "sync_with_ctx"?
+  _emscripten_dlsync_threads_async__sig: 'viii',
+  _emscripten_dlsync_threads_async__deps: ['_emscripten_proxy_dlsync_async', '$newNativePromise'],
+  _emscripten_dlsync_threads_async: function(caller, callback, ctx) {
+#if PTHREADS_DEBUG
+    dbg("_emscripten_dlsync_threads_async caller=" + ptrToString(caller));
+#endif
+#if ASSERTIONS
+    assert(!ENVIRONMENT_IS_PTHREAD, 'Internal Error! _emscripten_dlsync_threads_async() can only ever be called from main thread');
+#endif
+
+    const promises = [];
+
+    // This first promise resolves once the main thread has loaded all modules.
+    promises.push(newNativePromise(__emscripten_dlsync_self_async, null).promise);
+
+    // We then create a sequence of promises, one per thread, that resolve once
+    // each thread has performed its sync using _emscripten_proxy_dlsync.
+    // Any new threads that are created after this call will automaticaly be
+    // in sync because we call `__emscripten_dlsync_self` in
+    // invokeEntryPoint before the threads entry point is called.
+    for (const ptr of Object.keys(PThread.pthreads)) {
+      const pthread_ptr = Number(ptr);
+      if (pthread_ptr !== caller && !(pthread_ptr in PThread.zombieThreads)) {
+        promises.push(newNativePromise(__emscripten_proxy_dlsync_async, pthread_ptr).promise);
+      }
+    }
+
+#if PTHREADS_DEBUG
+    dbg('_emscripten_dlsync_threads_async: waiting on ' + promises.length + ' promises');
+#endif
+    // Once all promises are resolved then we know all threads are in sync and
+    // we can call the callback.
+    Promise.all(promises).then(() => {
+#if PTHREADS_DEBUG
+      dbg('_emscripten_dlsync_threads_async done: calling callback');
+#endif
+      {{{ makeDynCall('vp', 'callback') }}}(ctx);
+    });
+  },
+
+  // Synchronous version dlsync_threads. Always run on the main thread.
+  _emscripten_dlsync_threads__deps: ['_emscripten_proxy_dlsync'],
+  _emscripten_dlsync_threads: function() {
+#if ASSERTIONS
+    assert(!ENVIRONMENT_IS_PTHREAD, 'Internal Error! _emscripten_dlsync_threads() can only ever be called from main thread');
+#endif
+    for (const ptr of Object.keys(PThread.pthreads)) {
+      const pthread_ptr = Number(ptr);
+      if (!(pthread_ptr in PThread.zombieThreads)) {
+        __emscripten_proxy_dlsync(pthread_ptr);
+      }
+    }
+  },
+#endif // MAIN_MODULE
 
   $executeNotifiedProxyingQueue: function(queue) {
     // Set the notification state to processing.
