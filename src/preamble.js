@@ -156,15 +156,10 @@ function updateMemoryViews() {
 }
 
 #if ASSERTIONS
-if (Module['STACK_SIZE']) assert({{{ STACK_SIZE }}} === Module['STACK_SIZE'], 'the stack size can no longer be determined at runtime')
+assert(!Module['STACK_SIZE'], 'STACK_SIZE can no longer be set at runtime.  Use -sSTACK_SIZE at link time')
 #endif
 
-{{{ makeModuleReceiveWithVar('INITIAL_MEMORY', undefined, INITIAL_MEMORY) }}}
-
 #if ASSERTIONS
-assert(INITIAL_MEMORY >= {{{ STACK_SIZE }}}, 'INITIAL_MEMORY should be larger than STACK_SIZE, was ' + INITIAL_MEMORY + '! (STACK_SIZE=' + {{{ STACK_SIZE }}} + ')');
-
-// check for full engine support (use string 'subarray' to avoid closure compiler confusion)
 assert(typeof Int32Array != 'undefined' && typeof Float64Array !== 'undefined' && Int32Array.prototype.subarray != undefined && Int32Array.prototype.set != undefined,
        'JS engine does not provide full typed array support');
 #endif
@@ -172,13 +167,11 @@ assert(typeof Int32Array != 'undefined' && typeof Float64Array !== 'undefined' &
 #if IMPORTED_MEMORY
 // In non-standalone/normal mode, we create the memory here.
 #include "runtime_init_memory.js"
-#else // IMPORTED_MEMORY
-#if ASSERTIONS
-// If memory is defined in wasm, the user can't provide it.
+#elif ASSERTIONS
+// If memory is defined in wasm, the user can't provide it, or set INITIAL_MEMORY
 assert(!Module['wasmMemory'], 'Use of `wasmMemory` detected.  Use -sIMPORTED_MEMORY to define wasmMemory externally');
-assert(INITIAL_MEMORY == {{{INITIAL_MEMORY}}}, 'Detected runtime INITIAL_MEMORY setting.  Use -sIMPORTED_MEMORY to define wasmMemory dynamically');
-#endif // ASSERTIONS
-#endif // IMPORTED_MEMORY
+assert(!Module['INITIAL_MEMORY'], 'Detected runtime INITIAL_MEMORY setting.  Use -sIMPORTED_MEMORY to define wasmMemory dynamically');
+#endif // !IMPORTED_MEMORY && ASSERTIONS
 
 #include "runtime_init_table.js"
 #include "runtime_stack_check.js"
@@ -215,7 +208,6 @@ function preRun() {
 #if ASSERTIONS && USE_PTHREADS
   assert(!ENVIRONMENT_IS_PTHREAD); // PThreads reuse the runtime from the main thread.
 #endif
-
 #if expectToReceiveOnModule('preRun')
   if (Module['preRun']) {
     if (typeof Module['preRun'] == 'function') Module['preRun'] = [Module['preRun']];
@@ -224,7 +216,6 @@ function preRun() {
     }
   }
 #endif
-
   callRuntimeCallbacks(__ATPRERUN__);
 }
 
@@ -494,8 +485,6 @@ function abort(what) {
   throw e;
 #endif
 }
-
-// {{MEM_INITIALIZER}}
 
 #include "memoryprofiler.js"
 
