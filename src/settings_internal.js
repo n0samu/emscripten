@@ -241,3 +241,7 @@ var ALL_INCOMING_MODULE_JS_API = [];
 var WEAK_IMPORTS = [];
 
 var STACK_FIRST = false;
+
+var PRE_JS_FILES = [];
+
+var POST_JS_FILES = [];
